@@ -29,14 +29,29 @@ def get_players_list_text(chat_id):
     return text
 
 def check_winner(chat_id):
+    """3-band: G'oliblar va mag'lublar ro'yxati bilan o'yinni yakunlash"""
     game = games[chat_id]
     mafias = [u for u, d in game['players'].items() if d['is_alive'] and d['role'] in ['don', 'mafia']]
     citizens = [u for u, d in game['players'].items() if d['is_alive'] and d['role'] not in ['don', 'mafia']]
     
-    if not mafias:
-        return "🏆 <b>Tinch aholi g'alaba qozondi!</b> Mafialar barchasi yo'q qilindi."
-    if len(mafias) >= len(citizens):
-        return "🔥 <b>Mafia g'alaba qozondi!</b> Shahar endi mafialar qo'lida."
+    winner_team = None
+    if not mafias: winner_team = 'citizens'
+    elif len(mafias) >= len(citizens): winner_team = 'mafia'
+    
+    if winner_team:
+        text = "🏆 <b>O'yin yakunlandi!</b>\n\n"
+        winners = []
+        others = []
+        for uid, data in game['players'].items():
+            is_mafia = data['role'] in ['don', 'mafia']
+            if (winner_team == 'mafia' and is_mafia) or (winner_team == 'citizens' and not is_mafia):
+                winners.append(f"• {get_mention(uid, data['name'])} ({data['role_name']})")
+            else:
+                others.append(f"• {get_mention(uid, data['name'])} ({data['role_name']})")
+        
+        text += "<b>🥇 G'oliblar:</b>\n" + "\n".join(winners)
+        text += "\n\n<b>👥 Qolgan o'yinchilar:</b>\n" + "\n".join(others)
+        return text
     return None
 
 # --- O'YIN BOSHLASH ---
@@ -48,9 +63,10 @@ async def new_game(message: types.Message):
         'players': {}, 'state': 'joining', 'night_actions': {}, 
         'votes': {}, 'last_word_user': None, 'jury': {'l': [], 'd': []}
     }
+    # 4-band: Botga o'tish tugmasi
     link = await get_start_link(payload=f"join_{message.chat.id}", encode=False)
-    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🎮 Qo'shilish", url=link))
-    await message.answer("📢 <b>Mafia boshlanmoqda!</b>\nKamida 4 kishi kutilmoqda...", reply_markup=kb)
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🤖 Botga o'tish va qo'shilish", url=link))
+    await message.answer("📢 <b>Mafia boshlanmoqda!</b>\nO'yinda qatnashish uchun botga o'ting.", reply_markup=kb)
 
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
@@ -61,10 +77,10 @@ async def cmd_start(message: types.Message):
         if group_id not in games or games[group_id]['state'] != 'joining': return
         if user_id not in games[group_id]['players']:
             games[group_id]['players'][user_id] = {'name': message.from_user.full_name, 'is_alive': True, 'role': None}
-            await message.answer("✅ Siz o'yinga muvaffaqiyatli qo'shildingiz!")
+            await message.answer("✅ Siz o'yinga qo'shildingiz! Guruhga qayting.")
             kb = InlineKeyboardMarkup()
             link = await get_start_link(payload=f"join_{group_id}", encode=False)
-            kb.add(InlineKeyboardButton("🎮 Qo'shilish", url=link))
+            kb.add(InlineKeyboardButton("🎮 Ro'yxatga qo'shilish", url=link))
             if len(games[group_id]['players']) >= 4:
                 kb.add(InlineKeyboardButton("🚀 O'yinni boshlash", callback_data=f"startnow_{group_id}"))
             await bot.send_message(group_id, f"➕ {get_mention(user_id, message.from_user.full_name)} qo'shildi!", reply_markup=kb)
@@ -77,6 +93,7 @@ async def start_now(callback: types.CallbackQuery):
     uids = list(game['players'].keys())
     random.shuffle(uids)
 
+    # Rollar taqsimoti
     game['players'][uids[0]]['role'] = 'don'; game['players'][uids[0]]['role_name'] = "Don"
     game['players'][uids[1]]['role'] = 'doctor'; game['players'][uids[1]]['role_name'] = "Doktor"
     game['players'][uids[2]]['role'] = 'commissar'; game['players'][uids[2]]['role_name'] = "Komissar"
@@ -96,8 +113,8 @@ async def start_now(callback: types.CallbackQuery):
 # --- TUN BOSQICHI ---
 
 async def start_night(chat_id):
-    winner = check_winner(chat_id)
-    if winner: return await bot.send_message(chat_id, winner)
+    res = check_winner(chat_id)
+    if res: return await bot.send_message(chat_id, res)
 
     await bot.send_message(chat_id, "🌑 <b>Tun... (40 soniya)</b>")
     game = games[chat_id]
@@ -106,15 +123,24 @@ async def start_night(chat_id):
     for uid, data in game['players'].items():
         if not data['is_alive']: continue
         kb = InlineKeyboardMarkup()
-        if data['role'] in ['don', 'mafia', 'doctor']:
+        if data['role'] in ['don', 'mafia', 'doctor', 'commissar']:
             for tid, tdata in game['players'].items():
-                if tdata['is_alive']:
-                    kb.add(InlineKeyboardButton(tdata['name'], callback_data=f"act_{data['role']}_{tid}_{chat_id}"))
-            await bot.send_message(uid, "Vazifangizni tanlang:", reply_markup=kb)
-        elif data['role'] == 'commissar':
-            kb.add(InlineKeyboardButton("🔍 Tekshirish", callback_data=f"com_check_{chat_id}"))
-            kb.add(InlineKeyboardButton("🔫 O'ldirish", callback_data=f"com_kill_{chat_id}"))
-            await bot.send_message(uid, "Komissar, tanlang:", reply_markup=kb)
+                if not tdata['is_alive']: continue
+                # 2-band: Don va Komissar o'zini tanlay olmaydi (Doktor mumkin)
+                if data['role'] in ['don', 'commissar', 'mafia'] and tid == uid: continue
+                kb.add(InlineKeyboardButton(tdata['name'], callback_data=f"act_{data['role']}_{tid}_{chat_id}"))
+            
+            # 1-band: O'tkazib yuborish tugmasi
+            kb.add(InlineKeyboardButton("⏭ O'tkazib yuborish", callback_data=f"act_{data['role']}_skip_{chat_id}"))
+            
+            if data['role'] == 'commissar':
+                kb_com = InlineKeyboardMarkup().row(
+                    InlineKeyboardButton("🔍 Tekshirish", callback_data=f"com_check_{chat_id}"),
+                    InlineKeyboardButton("🔫 O'ldirish", callback_data=f"com_kill_{chat_id}")
+                )
+                await bot.send_message(uid, "Komissar, nima qilasiz?", reply_markup=kb_com)
+            else:
+                await bot.send_message(uid, f"{data['role_name']} vazifangizni tanlang:", reply_markup=kb)
 
     await asyncio.sleep(40)
     await start_day(chat_id)
@@ -128,27 +154,34 @@ async def night_action_cb(callback: types.CallbackQuery):
     if mode in ['check', 'kill']:
         kb = InlineKeyboardMarkup()
         for tid, tdata in games[chat_id]['players'].items():
-            if tdata['is_alive']:
+            if tdata['is_alive'] and tid != callback.from_user.id:
                 kb.add(InlineKeyboardButton(tdata['name'], callback_data=f"act_commissar_{mode}_{tid}_{chat_id}"))
-        msg = "Tekshirish uchun tanlang:" if mode == 'check' else "O'ldirish uchun tanlang:"
-        await callback.message.edit_text(msg, reply_markup=kb)
+        kb.add(InlineKeyboardButton("⏭ O'tkazib yuborish", callback_data=f"act_commissar_skip_{chat_id}"))
+        await callback.message.edit_text("Nishonni tanlang:", reply_markup=kb)
         return
     
     role = data[1]
-    target_id = int(data[-2])
+    target = data[2]
     
-    # KOMISSAR TEKSHIRUVI - FAQAT ROL KO'RINADI
+    # 1-band: O'tkazib yuborish mantiqi
+    if target == 'skip':
+        skip_msg = {
+            'don': "🕶 Don bugun hech kimni bezovta qilmadi.",
+            'mafia': "🔫 Mafia bugun dam olishga qaror qildi.",
+            'doctor': "💊 Doktor bugun hech kimni davolamaydi.",
+            'commissar': "🔍 Komissar bugun dam oladi."
+        }
+        await bot.send_message(chat_id, skip_msg.get(role, "Harakat o'tkazib yuborildi."))
+        await callback.message.edit_text("Siz harakatni o'tkazib yubordingiz.")
+        return
+
+    target_id = int(target)
     if role == 'commissar' and data[2] == 'check':
         target_role = games[chat_id]['players'][target_id]['role_name']
-        target_name = games[chat_id]['players'][target_id]['name']
-        await callback.message.edit_text(f"🔍 Natija:\n<b>{target_name}</b> — uning roli: <b>{target_role}</b>")
-        games[chat_id]['night_actions']['commissar_check'] = target_id
+        await callback.message.edit_text(f"🔍 Natija: <b>{games[chat_id]['players'][target_id]['name']}</b> — <b>{target_role}</b>")
     else:
-        if role == 'commissar' and data[2] == 'kill':
-            games[chat_id]['night_actions']['commissar_kill'] = target_id
-        else:
-            games[chat_id]['night_actions'][role] = target_id
-        await callback.message.edit_text("Tanlov saqlandi.")
+        games[chat_id]['night_actions'][role] = target_id
+        await callback.message.edit_text("Tanlov qabul qilindi.")
 
     notifs = {'don': "🕶 Don nishon tanladi.", 'mafia': "🔫 Mafia nishon tanladi.", 'doctor': "💊 Doktor davolash uchun ketdi.", 'commissar': "🔍 Komissar harakatda."}
     if role in notifs: await bot.send_message(chat_id, notifs[role])
@@ -160,7 +193,7 @@ async def start_day(chat_id):
     await bot.send_message(chat_id, "🌞 <b>Tong otdi!</b>")
     
     killed_mafia = game['night_actions'].get('don') or game['night_actions'].get('mafia')
-    killed_com = game['night_actions'].get('commissar_kill')
+    killed_com = game['night_actions'].get('commissar') if 'commissar' in game['night_actions'] else None
     saved = game['night_actions'].get('doctor')
     
     death_ids = []
@@ -172,7 +205,6 @@ async def start_day(chat_id):
             p = game['players'][d_id]
             p['is_alive'] = False
             await bot.send_message(chat_id, f"💀 {get_mention(d_id, p['name'])} o'ldirildi. U <b>{p['role_name']}</b> edi.")
-            await asyncio.sleep(5) 
     else:
         await bot.send_message(chat_id, "🛡 Tunda hech kim o'lmadi.")
 
@@ -180,12 +212,10 @@ async def start_day(chat_id):
     await start_voting(chat_id)
 
 async def start_voting(chat_id):
-    winner = check_winner(chat_id)
-    if winner: return await bot.send_message(chat_id, winner)
-
+    res = check_winner(chat_id)
+    if res: return await bot.send_message(chat_id, res)
     await bot.send_message(chat_id, "🗳 <b>Ovoz berish! (45s)</b>")
     game = games[chat_id]; game['votes'] = {}
-
     for uid, data in game['players'].items():
         if data['is_alive']:
             kb = InlineKeyboardMarkup()
@@ -194,18 +224,14 @@ async def start_voting(chat_id):
                     kb.add(InlineKeyboardButton(tdata['name'], callback_data=f"v_{tid}_{chat_id}"))
             try: await bot.send_message(uid, "Kimga ovoz berasiz?", reply_markup=kb)
             except: pass
-
-    await asyncio.sleep(45)
-    await process_voting_results(chat_id)
+    await asyncio.sleep(45); await process_voting_results(chat_id)
 
 @dp.callback_query_handler(lambda c: c.data.startswith('v_'))
 async def vote_handler(callback: types.CallbackQuery):
-    _, tid, chat_id = callback.data.split('_')
-    chat_id = int(chat_id); voter = callback.from_user
-    target = games[chat_id]['players'][int(tid)]
-    await bot.send_message(chat_id, f"🗳 {get_mention(voter.id, voter.full_name)} --> {get_mention(tid, target['name'])}ga ovoz berdi!")
-    games[chat_id]['votes'][voter.id] = int(tid)
-    await callback.message.edit_text("Ovoz qabul qilindi.")
+    _, tid, chat_id = callback.data.split('_'); chat_id = int(chat_id)
+    await bot.send_message(chat_id, f"🗳 {get_mention(callback.from_user.id, callback.from_user.full_name)} --> {get_mention(tid, games[chat_id]['players'][int(tid)]['name'])}ga ovoz berdi!")
+    games[chat_id]['votes'][callback.from_user.id] = int(tid)
+    await callback.message.edit_text("Ovoz olindi.")
 
 async def process_voting_results(chat_id):
     game = games[chat_id]
@@ -217,19 +243,13 @@ async def process_voting_results(chat_id):
     await bot.send_message(chat_id, f"⚖️ <b>Sud:</b> {get_mention(suspect_id, game['players'][suspect_id]['name'])} osilsinmi?", reply_markup=jury_kb(suspect_id, chat_id, 0, 0))
 
 def jury_kb(sid, cid, l_cnt, d_cnt):
-    return InlineKeyboardMarkup().row(
-        InlineKeyboardButton(f"👍 {l_cnt}", callback_data=f"jr_l_{sid}_{cid}"),
-        InlineKeyboardButton(f"👎 {d_cnt}", callback_data=f"jr_d_{sid}_{cid}")
-    )
+    return InlineKeyboardMarkup().row(InlineKeyboardButton(f"👍 {l_cnt}", callback_data=f"jr_l_{sid}_{cid}"), InlineKeyboardButton(f"👎 {d_cnt}", callback_data=f"jr_d_{sid}_{cid}"))
 
 @dp.callback_query_handler(lambda c: c.data.startswith('jr_'))
 async def jury_callback(callback: types.CallbackQuery):
-    _, vote, sid, cid = callback.data.split('_')
-    cid = int(cid); uid = callback.from_user.id; sid = int(sid)
-    game = games[cid]
-    if uid == sid: return await callback.answer("Sudlanuvchi ovoz bera olmaydi!", show_alert=True)
-    if uid in game['jury']['l'] or uid in game['jury']['d']: return await callback.answer("Faqat bir marta!", show_alert=True)
-    game['jury'][vote].append(uid)
+    _, vote, sid, cid = callback.data.split('_'); cid = int(cid); sid = int(sid); game = games[cid]
+    if callback.from_user.id == sid or callback.from_user.id in game['jury']['l'] or callback.from_user.id in game['jury']['d']: return await callback.answer("Ruxsat yo'q!")
+    game['jury'][vote].append(callback.from_user.id)
     await callback.message.edit_reply_markup(reply_markup=jury_kb(sid, cid, len(game['jury']['l']), len(game['jury']['d'])))
 
 if __name__ == '__main__':
